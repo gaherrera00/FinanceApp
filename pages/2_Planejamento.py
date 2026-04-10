@@ -1,13 +1,19 @@
 import streamlit as st
 import pandas as pd
+import calendar
 from datetime import date
-from services.sheets import get_gastos, get_metas, append_meta
-
+from services.sheets import get_gastos, get_metas, append_meta, calcular_renda_mes
 
 st.set_page_config(page_title="Planejamento", layout="wide")
-st.title("Planejamento")
 
-RENDA = 3000
+st.markdown(
+    """
+    <h1 style='text-align:center; font-weight:600; margin-bottom:5px;'>
+        Planejamento Financeiro
+    </h1>
+    """,
+    unsafe_allow_html=True,
+)
 
 
 def brl(valor):
@@ -30,36 +36,51 @@ df = df.dropna()
 # ===== FILTRO MÊS =====
 mes_atual = pd.Timestamp.today().to_period("M")
 df["mes"] = df["data"].dt.to_period("M")
-
 df_mes = df[df["mes"] == mes_atual]
+
+# ===== RENDA =====
+RENDA, _, _ = calcular_renda_mes(mes_atual)
+
+if RENDA == 0:
+    st.warning("Renda não configurada")
 
 total = df_mes["valor"].sum()
 poupanca = RENDA - total
 
-# ===== PROJEÇÃO =====
-st.subheader("Projeção")
+# ================= PROJEÇÃO =================
+st.markdown("### Projeção do mês")
 
 if len(df_mes) > 0:
     gasto_dia = df_mes.groupby(df_mes["data"].dt.date)["valor"].sum()
     media_diaria = gasto_dia.mean()
 
-    dias_restantes = 30 - date.today().day
+    hoje = date.today()
+    dias_no_mes = calendar.monthrange(hoje.year, hoje.month)[1]
+    dias_restantes = dias_no_mes - hoje.day
+
     projecao = total + (media_diaria * dias_restantes)
 
-    st.metric("Projeção do mês", brl(projecao))
+    col1, col2 = st.columns(2)
 
-    if projecao > RENDA:
-        st.error("Se continuar assim, você vai gastar mais do que ganha")
+    col1.metric("Projeção", brl(projecao))
+    col2.metric("Saldo projetado", brl(RENDA - projecao))
+
+    if RENDA > 0 and projecao > RENDA:
+        st.error("Gastos acima da renda projetada")
+    elif RENDA > 0:
+        st.success("Dentro da projeção")
 else:
-    st.info("Sem dados suficientes para projeção")
+    st.info("Sem dados suficientes")
 
-# ===== FORM META =====
-st.subheader("Criar meta")
+st.divider()
+
+# ================= META =================
+st.markdown("### Criar meta")
 
 col1, col2, col3 = st.columns(3)
 
 with col1:
-    nome = st.text_input("Nome da meta")
+    nome = st.text_input("Nome")
 
 with col2:
     valor_total = st.number_input("Valor total", min_value=0.0, step=100.0)
@@ -72,10 +93,12 @@ if st.button("Salvar meta"):
         append_meta([nome, valor_total, prazo, str(date.today())])
         st.success("Meta criada")
     else:
-        st.error("Preencha corretamente")
+        st.error("Dados inválidos")
 
-# ===== METAS =====
-st.subheader("Suas metas")
+st.divider()
+
+# ================= METAS =================
+st.markdown("### Suas metas")
 
 metas = get_metas()
 
@@ -88,32 +111,27 @@ for meta in metas:
     prazo = int(meta["prazo_meses"])
 
     valor_mensal = valor_total / prazo
-
     economizado = max(poupanca, 0)
     percentual = (economizado / valor_total * 100) if valor_total > 0 else 0
+    falta = valor_total - economizado
 
-    st.markdown(f"### {nome}")
+    st.markdown(f"#### {nome}")
 
     col1, col2, col3 = st.columns(3)
 
-    with col1:
-        st.metric("Meta total", brl(valor_total))
-
-    with col2:
-        st.metric("Meta mensal", brl(valor_mensal))
-
-    with col3:
-        st.metric("Progresso", f"{percentual:.1f}%".replace(".", ","))
+    col1.metric("Total", brl(valor_total))
+    col2.metric("Mensal", brl(valor_mensal))
+    col3.metric("Progresso", f"{percentual:.1f}%".replace(".", ","))
 
     st.progress(min(percentual / 100, 1.0))
 
-    falta = valor_total - economizado
     st.caption(f"Falta: {brl(falta)}")
 
-    # ===== ALERTA =====
     if economizado < valor_mensal:
-        st.error("Você não está no ritmo da meta")
+        st.error("Abaixo do ritmo da meta")
 
-# ===== VOLTAR =====
-if st.button("← Voltar para Dashboard"):
-    st.switch_page("app.py")
+st.divider()
+
+# ================= NAV =================
+if st.button("Voltar"):
+    st.switch_page("Dashboard.py")

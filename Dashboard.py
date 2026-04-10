@@ -1,15 +1,24 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-from services.sheets import get_gastos, get_orcamentos
-
+from services.sheets import (
+    get_gastos,
+    get_orcamentos,
+    calcular_renda_mes,
+    get_renda_fixa_config,
+)
 
 # ===== CONFIG =====
 st.set_page_config(page_title="Dashboard", layout="wide")
-st.title("Dashboard")
 
-# ===== CONFIG FIXA (MVP) =====
-RENDA = 3000
+st.markdown(
+    """
+    <h1 style='text-align:center; font-weight:600; margin-bottom:5px;'>
+        Dashboard Financeiro
+    </h1>
+    """,
+    unsafe_allow_html=True,
+)
 
 CENTROS = {
     "Essencial": ["fixo", "comida"],
@@ -51,8 +60,13 @@ df["centro"] = df["categoria"].map(
 # ===== FILTRO MÊS =====
 mes_atual = pd.Timestamp.today().to_period("M")
 df["mes"] = df["data"].dt.to_period("M")
-
 df_mes = df[df["mes"] == mes_atual]
+
+# ===== RENDA =====
+RENDA, renda_fixa_val, renda_fixa_dia = calcular_renda_mes(mes_atual)
+
+if RENDA == 0:
+    st.warning("Configure sua renda em Registrar → Configuração de renda")
 
 # ===== KPIs =====
 total = df_mes["valor"].sum()
@@ -66,7 +80,6 @@ grouped_tipo = df_mes.groupby("tipo")["valor"].sum()
 # ===== MÊS ANTERIOR =====
 mes_anterior = mes_atual - 1
 df_ant = df[df["mes"] == mes_anterior]
-
 total_ant = df_ant["valor"].sum()
 variacao = ((total - total_ant) / total_ant * 100) if total_ant > 0 else 0
 
@@ -81,7 +94,6 @@ estourou = False
 for cat in grouped.index:
     gasto = grouped.get(cat, 0)
     limite = orc_dict.get(cat, 0)
-
     if limite > 0 and gasto > limite:
         score -= 20
         estourou = True
@@ -97,25 +109,37 @@ if taxa_poupanca < 10:
 
 score = max(score, 0)
 
-# ===== TOPO =====
-col1, col2, col3 = st.columns(3)
+# ===== KPI =====
+st.markdown("### Visão geral")
 
-col1.metric("Total gasto", brl(total))
-col2.metric("Score financeiro", score)
-col3.metric("Poupança", f"{taxa_poupanca:.1f}%".replace(".", ","))
+col1, col2, col3, col4 = st.columns(4)
+
+col1.metric("Renda", brl(RENDA))
+col2.metric("Gastos", brl(total))
+col3.metric("Score", score)
+col4.metric(
+    "Poupança",
+    brl(poupanca),
+    f"{taxa_poupanca:.1f}%".replace(".", ","),
+    delta_color="inverse" if poupanca < 0 else "normal",
+)
+
+st.divider()
 
 # ===== ALERTAS =====
 if estourou:
-    st.error("Você estourou um ou mais orçamentos")
+    st.error("Orçamento ultrapassado")
 
 if variacao > 10:
-    st.warning("Seus gastos aumentaram vs mês passado")
+    st.warning("Aumento de gastos em relação ao mês anterior")
 
-if taxa_poupanca < 10:
+if taxa_poupanca < 10 and RENDA > 0:
     st.error("Baixa capacidade de poupança")
 
-# ===== CONTROLE =====
-st.subheader("Orçamento por categoria")
+st.divider()
+
+# ===== ORÇAMENTO =====
+st.markdown("### Orçamento por categoria")
 
 if len(grouped) > 0:
     cols = st.columns(len(grouped))
@@ -124,10 +148,12 @@ if len(grouped) > 0:
         with cols[i]:
             gasto = grouped.get(cat, 0)
             limite = orc_dict.get(cat, 0)
-
             percentual = (gasto / limite * 100) if limite > 0 else 0
 
-            st.markdown(f"**{cat.upper()}**")
+            st.markdown(
+                f"<div style='font-weight:600; font-size:14px;'>{cat.upper()}</div>",
+                unsafe_allow_html=True,
+            )
 
             st.metric(
                 "Gasto",
@@ -139,34 +165,33 @@ if len(grouped) > 0:
             st.progress(min(percentual / 100, 1.0))
             st.caption(f"{brl(gasto)} / {brl(limite)}")
 
+st.divider()
+
 # ===== INSIGHTS =====
-st.subheader("Insights")
+st.markdown("### Insights")
 
 col1, col2, col3 = st.columns(3)
 
-with col1:
-    if len(grouped) > 0:
-        st.metric("Maior gasto", grouped.idxmax())
+col1.metric("Maior gasto", grouped.idxmax() if len(grouped) > 0 else "-")
+col2.metric("Supérfluo", f"{perc_sup:.1f}%".replace(".", ","))
+col3.metric("Variação", f"{variacao:.1f}%".replace(".", ","))
 
-with col2:
-    st.metric("Supérfluo (%)", f"{perc_sup:.1f}%".replace(".", ","))
+st.divider()
 
-with col3:
-    st.metric("Variação mensal", f"{variacao:.1f}%".replace(".", ","))
-
-# ===== GASTO POR DIA =====
-st.subheader("Gasto por dia")
+# ===== GRÁFICOS =====
+st.markdown("### Evolução dos gastos")
 
 gasto_dia = df_mes.groupby(df_mes["data"].dt.date)["valor"].sum()
 st.line_chart(gasto_dia)
 
-# ===== GRÁFICO =====
-st.subheader("Distribuição")
+st.markdown("### Distribuição")
 
 if len(grouped) > 0:
     fig = px.pie(values=grouped.values, names=grouped.index)
     st.plotly_chart(fig, use_container_width=True)
 
+st.divider()
+
 # ===== CTA =====
-if st.button("+ Registrar gasto"):
+if st.button("Registrar gasto"):
     st.switch_page("pages/1_Registrar.py")
