@@ -1,5 +1,6 @@
 import streamlit as st
 import gspread
+import pandas as pd
 from google.oauth2.service_account import Credentials
 import calendar
 from datetime import date
@@ -9,23 +10,45 @@ SCOPES = [
     "https://www.googleapis.com/auth/drive",
 ]
 
+# Cabeçalhos padrão por aba — criados automaticamente se a aba não existir
+_ABA_HEADERS = {
+    "gastos": ["data", "categoria", "valor", "tipo", "centro"],
+    "orcamentos": ["categoria", "limite"],
+    "metas": ["nome", "valor_total", "prazo_meses", "data_inicio"],
+    "renda": ["tipo", "valor", "dia_recebimento", "descricao", "data_registro"],
+}
+
 
 @st.cache_resource
 def get_client():
-    creds = Credentials.from_service_account_file(
-        "credentials/finance-app-492913-4a8c4dca053f.json", scopes=SCOPES
-    )
+    try:
+        # Produção (Streamlit Cloud): lê dos secrets
+        secret = st.secrets["gcp_service_account"]
+        creds = Credentials.from_service_account_info(secret, scopes=SCOPES)
+    except Exception:
+        # Local: lê do arquivo JSON
+        creds = Credentials.from_service_account_file(
+            "credentials/finance-app-492913-4a8c4dca053f.json", scopes=SCOPES
+        )
     return gspread.authorize(creds)
 
 
 @st.cache_resource
 def get_spreadsheet():
-    client = get_client()
-    return client.open("FinanceApp")
+    return get_client().open("FinanceApp")
 
 
 def get_sheet(name):
-    return get_spreadsheet().worksheet(name)
+    """Retorna a worksheet. Se não existir, cria com cabeçalhos automaticamente."""
+    spreadsheet = get_spreadsheet()
+    try:
+        return spreadsheet.worksheet(name)
+    except gspread.exceptions.WorksheetNotFound:
+        sheet = spreadsheet.add_worksheet(title=name, rows=1000, cols=20)
+        headers = _ABA_HEADERS.get(name, [])
+        if headers:
+            sheet.append_row(headers)
+        return sheet
 
 
 # ===== GASTOS =====
@@ -41,7 +64,7 @@ def append_gasto(row):
     st.cache_data.clear()
 
 
-# ===== ORÇAMENTOS =====
+# ===== ORCAMENTOS =====
 @st.cache_data(ttl=60)
 def get_orcamentos():
     sheet = get_sheet("orcamentos")
@@ -76,8 +99,9 @@ def append_meta(row):
 
 
 # ===== RENDA =====
-# Aba "renda" com colunas: tipo | valor | dia_recebimento | descricao | data_registro
-# tipo: "fixo" (recorrente mensal) ou "avulso" (único)
+# Aba "renda" — colunas: tipo | valor | dia_recebimento | descricao | data_registro
+# tipo "fixo"   -> renda recorrente mensal
+# tipo "avulso" -> pagamento unico (bonus, freela, etc.)
 
 
 @st.cache_data(ttl=30)
@@ -87,19 +111,19 @@ def get_rendas():
 
 
 def append_renda(row):
-    """Adiciona uma linha na aba renda. row = [tipo, valor, dia_recebimento, descricao, data_registro]"""
+    """row = [tipo, valor, dia_recebimento, descricao, data_registro]"""
     sheet = get_sheet("renda")
     sheet.append_row(row)
     st.cache_data.clear()
 
 
 def upsert_renda_fixa(valor, dia_recebimento):
-    """Atualiza (ou cria) a entrada de renda fixa mensal."""
+    """Atualiza a linha de renda fixa ou cria se nao existir."""
     sheet = get_sheet("renda")
     records = sheet.get_all_records()
 
     for i, row in enumerate(records, start=2):
-        if row["tipo"] == "fixo":
+        if str(row.get("tipo", "")).strip().lower() == "fixo":
             sheet.update(
                 f"A{i}:E{i}",
                 [
@@ -121,10 +145,24 @@ def upsert_renda_fixa(valor, dia_recebimento):
     st.cache_data.clear()
 
 
+def get_renda_fixa_config():
+    """Retorna (valor, dia) da renda fixa, ou (0.0, 1) se nao configurada."""
+    rendas = get_rendas()
+    for r in rendas:
+        if str(r.get("tipo", "")).strip().lower() == "fixo":
+            try:
+                return float(r["valor"]), int(r["dia_recebimento"])
+            except (ValueError, TypeError):
+                return float(r.get("valor", 0)), 1
+    return 0.0, 1
+
+
 def calcular_renda_mes(mes_period=None):
     """
-    Calcula a renda total que DEVE ter sido recebida no mês informado.
-    Considera renda fixa (se o dia de recebimento já passou) + avulsos do mês.
+    Calcula a renda total do mes informado.
+    - Renda fixa: conta se o dia de recebimento ja passou no mes atual.
+    - Avulsos: soma apenas os registrados no mes informado.
+    Retorna: (total, renda_fixa_valor, renda_fixa_dia)
     """
     if mes_period is None:
         mes_period = pd.Timestamp.today().to_period("M")
@@ -150,34 +188,17 @@ def calcular_renda_mes(mes_period=None):
         elif tipo == "avulso":
             data_str = str(r.get("data_registro", ""))
             try:
-                import pandas as pd
-
                 data_reg = pd.to_datetime(data_str)
                 if data_reg.to_period("M") == mes_period:
                     total += valor
             except Exception:
                 pass
 
-    # Renda fixa: conta só se o dia de recebimento já passou no mês atual
+    # Renda fixa so entra se o dia de recebimento ja passou este mes
     if renda_fixa_valor > 0 and renda_fixa_dia is not None:
-        ano = hoje.year
-        mes = hoje.month
-        ultimo_dia = calendar.monthrange(ano, mes)[1]
+        ultimo_dia = calendar.monthrange(hoje.year, hoje.month)[1]
         dia_real = min(renda_fixa_dia, ultimo_dia)
-
         if hoje.day >= dia_real:
             total += renda_fixa_valor
 
     return total, renda_fixa_valor, renda_fixa_dia
-
-
-def get_renda_fixa_config():
-    """Retorna (valor, dia) da renda fixa, ou (0, 1) se não configurada."""
-    rendas = get_rendas()
-    for r in rendas:
-        if str(r.get("tipo", "")).strip().lower() == "fixo":
-            try:
-                return float(r["valor"]), int(r["dia_recebimento"])
-            except (ValueError, TypeError):
-                return float(r.get("valor", 0)), 1
-    return 0.0, 1
